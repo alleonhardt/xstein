@@ -22,25 +22,34 @@ struct DocumentInfo {
     doc_freq: i32,
 }
 
-struct OrderedCollector<'a> {
-    traversal: std::collections::LinkedList<Vec<&'a DocumentInfo>>,
+struct OrderedCollector<'a,X: Serialize+Deserialize<'a>> {
+    traversal: std::collections::LinkedList<SearchHit<'a,X>>,
 }
 
-impl<'a> OrderedCollector<'a> {
-    pub fn with_capacity(capacity: usize) -> OrderedCollector<'a> {
+impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
+    pub fn new() -> OrderedCollector<'a,X> {
         OrderedCollector {
             traversal: std::collections::LinkedList::new(),
         }
     }
 
-    pub fn finalize(self) -> std::collections::LinkedList<Vec<&'a DocumentInfo>> {
+    pub fn finalize(self) -> std::collections::LinkedList<SearchHit<'a,X>> {
         self.traversal
     }
 
-    pub fn add_array(&mut self,idx: &'a [DocumentInfo]) {
+    pub fn add_array(&mut self,idx: &'a [DocumentInfo], word_index: i32, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
         if self.traversal.len() == 0 {
-            for x in idx {
-                self.traversal.push_back(vec![x]);
+            for x in 0..idx.len() {
+                let information = MemBufferReader::new(&buffer[idx[x].doc_ptr as usize..]).unwrap();
+                let search = SearchHit {
+                    doc_ptr: idx[x].doc_ptr,
+                    metadata: information.load_serde_entry::<X>(0).unwrap(),
+                    body: information.load_entry(1).unwrap(),
+                    doc_score: 0.0,
+                    matched_words: vec![word_index],
+                    positions: vec![word_pos[x]]
+                };
+                self.traversal.push_back(search);
             }
             return ();
         }
@@ -49,16 +58,26 @@ impl<'a> OrderedCollector<'a> {
         let mut index_other = 0;
         loop {
             if let Some(curr_doc_info) = cursor_front.current() {
-                let curr_ptr = curr_doc_info[0].doc_ptr;
+                let curr_ptr = curr_doc_info.doc_ptr;
                 if curr_ptr < idx[index_other].doc_ptr {
                     cursor_front.move_next();
                     continue;
                 }
                 else if curr_ptr == idx[index_other].doc_ptr {
-                    curr_doc_info.push(&idx[index_other]);
+                    curr_doc_info.matched_words.push(word_index);
+                    curr_doc_info.positions.push(word_pos[index_other]);
                 }
                 else {
-                    cursor_front.insert_before(vec![&idx[index_other]]);
+                    let information = MemBufferReader::new(&buffer[idx[index_other].doc_ptr as usize..]).unwrap();
+                    let x = SearchHit {
+                        doc_ptr: idx[index_other].doc_ptr,
+                        metadata: information.load_serde_entry::<X>(0).unwrap(),
+                        body: information.load_entry(1).unwrap(),
+                        doc_score: 0.0,
+                        matched_words: vec![word_index],
+                        positions: vec![word_pos[index_other]]
+                    };
+                    cursor_front.insert_before(x);
                 }
 
                 index_other+=1;
@@ -280,6 +299,7 @@ struct IndexMmapReader {
 }
 
 struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
+    doc_ptr: u64,
     metadata: X,
     body: &'a str,
     doc_score: f32,
@@ -288,7 +308,7 @@ struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
 }
 
 struct DocumentSearchResult<'a,X: Serialize+Deserialize<'a>> {
-    map_of_ids: std::collections::HashMap<u64,SearchHit<'a,X>>,
+    map_of_ids: std::collections::LinkedList<SearchHit<'a,X>>,
     matched_words: Vec<(String, u64)>,
 }
 
@@ -315,39 +335,26 @@ impl<'a> IndexMmapReader {
         }
 
         let mut return_value : DocumentSearchResult<'a,X> = DocumentSearchResult {
-            map_of_ids: std::collections::HashMap::with_capacity(max_results),
+            map_of_ids: std::collections::LinkedList::new(),
             matched_words: stream_result
         };
 
+        let mut orderedcoll: OrderedCollector<'a,X> = OrderedCollector::new();
         //58ms
         let mut counter = 0;
         for (key,value) in return_value.matched_words.iter() {
             let reader = MemBufferReader::new(&val[*value as usize..]).unwrap();
             let val: DocumentCollection = reader.load_entry(reader.len()-1).unwrap();
+            let mut docs : Vec<&'a [u32]> = Vec::with_capacity(val.docs.len());
+
             for x in 0..val.docs.len() {
-                if let Some(search_hit) = return_value.map_of_ids.get_mut(&val.docs[x].doc_ptr) {
-                    search_hit.matched_words.push(counter);
-                    search_hit.positions.push(reader.load_entry::<&[u32]>(x).unwrap());
-                }
-                else {
-                    let documenta : MemBufferReader = MemBufferReader::new(&self.document_contents[val.docs[x].doc_ptr as usize..]).unwrap();
-                    let meta: X = documenta.load_serde_entry(0).unwrap(); 
-                    let body: &'a str = documenta.load_entry::<&str>(1).unwrap();
-                    return_value.map_of_ids.insert(val.docs[x].doc_ptr, SearchHit {
-                        metadata: meta,
-                        body: body,
-                        doc_score: 0.0,
-                        matched_words: vec![counter],
-                        positions: vec![reader.load_entry::<&[u32]>(x).unwrap()],
-                    });
-                    
-                    if return_value.map_of_ids.len() > max_results {
-                        return return_value;
-                    }
-                }
+                docs.push(reader.load_entry(x).unwrap());
             }
+
+            orderedcoll.add_array(val.docs, counter, docs, &self.document_contents);
             counter+=1;
         }
+        return_value.map_of_ids = orderedcoll.finalize();
         return_value
    }
 }
@@ -367,16 +374,10 @@ mod tests {
     fn check_simple_search() {
         let mut new_writer = IndexMemmapWriter::new("big_data");
         let hugestring = std::fs::read_to_string("main.txt").unwrap();
-        let hugestring1 = std::fs::read_to_string("second.txt").unwrap();
-        let hugestring2 = std::fs::read_to_string("third.txt").unwrap();
         let doc = DocumentMeta {
             title: "The modern Intel System Environment",
             path: "main.txt"
         };
-        new_writer.add_document(&hugestring,&doc);
-        new_writer.add_document(&hugestring,&doc);
-        new_writer.add_document(&hugestring1,&doc);
-        new_writer.add_document(&hugestring2,&doc);
         for x in 0..10 {
             new_writer.add_document(&hugestring, &doc);
         }
@@ -387,7 +388,7 @@ mod tests {
         new_writer.commit();
 
         let reader = IndexMmapReader::new("big_data");
-        reader.search::<DocumentMeta>("and",10);
+        let results = reader.search::<DocumentMeta>("intel",0);
     }
 }
 
@@ -447,10 +448,10 @@ mod bench {
 
         b.iter(|| {
             let reader = IndexMmapReader::new("big_data");
-            let result = reader.search::<DocumentMeta>("and",0);
+            let result = reader.search::<DocumentMeta>("intel",0);
             let mut score = 0.0;
-            for (x,y) in result.map_of_ids {
-                score+=y.doc_score;
+            for x in result.map_of_ids.iter() {
+                score+=x.doc_score;
             }
         });
     }
