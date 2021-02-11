@@ -37,20 +37,24 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
         self.traversal
     }
 
+    pub fn insert_all(&mut self,idx: &'a [DocumentInfo], word_index: i32, word_pos: &[&'a [u32]], buffer: &'a [u8]) {
+        for x in 0..idx.len() {
+            let information = MemBufferReader::new(&buffer[idx[x].doc_ptr as usize..]).unwrap();
+            let search = SearchHit {
+                doc_ptr: idx[x].doc_ptr,
+                metadata: information.load_serde_entry::<X>(0).unwrap(),
+                body: information.load_entry(1).unwrap(),
+                doc_score: 0.0,
+                matched_words: vec![word_index],
+                positions: vec![word_pos[x]]
+            };
+            self.traversal.push_back(search);
+        }
+    }
+    
     pub fn add_array(&mut self,idx: &'a [DocumentInfo], word_index: i32, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
         if self.traversal.len() == 0 {
-            for x in 0..idx.len() {
-                let information = MemBufferReader::new(&buffer[idx[x].doc_ptr as usize..]).unwrap();
-                let search = SearchHit {
-                    doc_ptr: idx[x].doc_ptr,
-                    metadata: information.load_serde_entry::<X>(0).unwrap(),
-                    body: information.load_entry(1).unwrap(),
-                    doc_score: 0.0,
-                    matched_words: vec![word_index],
-                    positions: vec![word_pos[x]]
-                };
-                self.traversal.push_back(search);
-            }
+            self.insert_all(idx, word_index, &word_pos[..], buffer);
             return ();
         }
 
@@ -86,6 +90,9 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
                 }
             }
             else {
+                if index_other < idx.len() {
+                    self.insert_all(&idx[index_other..], word_index, &word_pos[index_other..], buffer);
+                }
                 break;
             }
         }
@@ -325,14 +332,12 @@ impl<'a> IndexMmapReader {
         
     }
 
-    pub fn search<X: Serialize+Deserialize<'a>>(&'a self,string: &str,mut max_results: usize) -> DocumentSearchResult<'a, X> {
+    pub fn search<X: Serialize+Deserialize<'a>>(&'a self,string: &str,max_results: usize) -> DocumentSearchResult<'a, X> {
         let dfa = DFAWrapper(self.dist.build_dfa(string));
         let result = self.automaton.search(dfa).into_stream();
         let val : &[u8] = &self.document_terms;
         let stream_result = result.into_str_vec().unwrap();
-        if max_results == 0 {
-            max_results = 100_000
-        }
+        
 
         let mut return_value : DocumentSearchResult<'a,X> = DocumentSearchResult {
             map_of_ids: std::collections::LinkedList::new(),
@@ -342,11 +347,12 @@ impl<'a> IndexMmapReader {
         let mut orderedcoll: OrderedCollector<'a,X> = OrderedCollector::new();
         //58ms
         let mut counter = 0;
-        for (key,value) in return_value.matched_words.iter() {
+        for (_,value) in return_value.matched_words.iter() {
             let reader = MemBufferReader::new(&val[*value as usize..]).unwrap();
             let val: DocumentCollection = reader.load_entry(reader.len()-1).unwrap();
             let mut docs : Vec<&'a [u32]> = Vec::with_capacity(val.docs.len());
 
+            println!("Sending {} docs",val.docs.len());
             for x in 0..val.docs.len() {
                 docs.push(reader.load_entry(x).unwrap());
             }
@@ -448,7 +454,7 @@ mod bench {
 
         b.iter(|| {
             let reader = IndexMmapReader::new("big_data");
-            let result = reader.search::<DocumentMeta>("intel",0);
+            let result = reader.search::<DocumentMeta>("and",0);
             let mut score = 0.0;
             for x in result.map_of_ids.iter() {
                 score+=x.doc_score;
