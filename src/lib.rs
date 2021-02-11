@@ -39,6 +39,7 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
 
     pub fn insert_all(&mut self,idx: &'a [DocumentInfo], word_index: i32, word_pos: &[&'a [u32]], buffer: &'a [u8]) {
         for x in 0..idx.len() {
+            println!("{}",idx[x].doc_ptr);
             let information = MemBufferReader::new(&buffer[idx[x].doc_ptr as usize..]).unwrap();
             let search = SearchHit {
                 doc_ptr: idx[x].doc_ptr,
@@ -52,7 +53,7 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
         }
     }
     
-    pub fn add_array(&mut self,idx: &'a [DocumentInfo], word_index: i32, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
+    pub fn add_array(&mut self, idx: &'a [DocumentInfo], word_index: i32, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
         if self.traversal.len() == 0 {
             self.insert_all(idx, word_index, &word_pos[..], buffer);
             return ();
@@ -91,6 +92,7 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
             }
             else {
                 if index_other < idx.len() {
+                    println!("Before insert all {}",self.traversal.len());
                     self.insert_all(&idx[index_other..], word_index, &word_pos[index_other..], buffer);
                 }
                 break;
@@ -108,7 +110,7 @@ struct DocumentCollection<'a> {
 
 #[derive(Serialize,Deserialize)]
 struct IndexWriterLazy {
-    position_list: std::collections::HashMap<u64,Vec<u32>>
+    position_list: std::collections::BTreeMap<u64,Vec<u32>>
 }
 
 #[derive(Serialize,Deserialize)]
@@ -200,7 +202,7 @@ impl IndexMemmapWriter {
             }
         }
         else {
-            let mut pos_list = std::collections::HashMap::new();
+            let mut pos_list = std::collections::BTreeMap::new();
             pos_list.insert(doc_id,vec![index_key_start as u32]);
             self.values.index.insert(key.to_string(),IndexWriterLazy {
                 position_list: pos_list
@@ -358,6 +360,7 @@ impl<'a> IndexMmapReader {
             }
 
             orderedcoll.add_array(val.docs, counter, docs, &self.document_contents);
+            println!("total len: {}",orderedcoll.traversal.len());
             counter+=1;
         }
         return_value.map_of_ids = orderedcoll.finalize();
@@ -447,7 +450,7 @@ mod bench {
             new_writer.add_document(&hugestring, &doc);
         }
 
-        for x in 0..100_000 {
+        for x in 0..1_000 {
             new_writer.add_document("Hello how are you? I am very well and look forward to relaxing with you like a lot, this could happen a lot more often.", &doc);
         }
         new_writer.commit();
@@ -455,6 +458,7 @@ mod bench {
         b.iter(|| {
             let reader = IndexMmapReader::new("big_data");
             let result = reader.search::<DocumentMeta>("and",0);
+            assert_eq!(result.map_of_ids.len(),1_014);
             let mut score = 0.0;
             for x in result.map_of_ids.iter() {
                 score+=x.doc_score;
