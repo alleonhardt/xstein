@@ -327,7 +327,7 @@ pub struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
     pub positions: Vec<&'a [u32]>,
 }
 
-struct DocumentSearchResult<'a,X: Serialize+Deserialize<'a>> {
+pub struct DocumentSearchResult<'a,X: Serialize+Deserialize<'a>> {
     map_of_ids: std::collections::LinkedList<SearchHit<'a,X>>,
     matched_words: Vec<std::rc::Rc<(String,u64,u8)>>
 }
