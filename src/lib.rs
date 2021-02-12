@@ -18,7 +18,7 @@ use bincode;
 use std::time;
 use fst::Streamer;
 
-struct DocumentInfo {
+pub struct DocumentInfo {
     doc_ptr: u64,
     doc_freq: f32,
 }
@@ -114,7 +114,7 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
 
 
 
-struct DocumentCollection<'a> {
+pub struct DocumentCollection<'a> {
     docs: &'a [DocumentInfo],
 }
 
@@ -131,7 +131,7 @@ struct IndexInformations {
     document_count: u32,
 }
 
-struct IndexMemmapWriter {
+pub struct IndexMemmapWriter {
     values: IndexInformations,
     index_body: Vec<u8>,
     directory: String,
@@ -156,11 +156,6 @@ impl<'a> membuffer::MemBufferSerialize for DocumentCollection<'a> {
     fn get_mem_buffer_type() -> i32 {
         10
     }
-}
-
-struct Document<'a,X: Serialize+Deserialize<'a>> {
-    metadata: X,
-    body: &'a str,
 }
 
 
@@ -315,7 +310,7 @@ impl fst::Automaton for DFAWrapper {
 }
 
 
-struct IndexMmapReader {
+pub struct IndexMmapReader {
     document_contents: memmap::Mmap,
     document_terms: memmap::Mmap,
     automaton: fst::Map<memmap::Mmap>,
@@ -323,7 +318,7 @@ struct IndexMmapReader {
     load_metadata: bool,
 }
 
-struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
+pub struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
     pub doc_ptr: u64,
     pub metadata: Option<X>,
     pub body: &'a str,
