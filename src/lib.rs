@@ -328,8 +328,8 @@ pub struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
 }
 
 pub struct DocumentSearchResult<'a,X: Serialize+Deserialize<'a>> {
-    map_of_ids: std::collections::LinkedList<SearchHit<'a,X>>,
-    matched_words: Vec<std::rc::Rc<(String,u64,u8)>>
+    pub map_of_ids: std::collections::LinkedList<SearchHit<'a,X>>,
+    pub matched_words: Vec<std::rc::Rc<(String,u64,u8)>>
 }
 
 impl<'a> IndexMmapReader {
