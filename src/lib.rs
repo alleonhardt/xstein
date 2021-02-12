@@ -24,80 +24,90 @@ struct DocumentInfo {
 }
 
 struct OrderedCollector<'a,X: Serialize+Deserialize<'a>> {
-    traversal: Vec<SearchHit<'a,X>>,
+    traversal: std::collections::LinkedList<SearchHit<'a,X>>,
+    load_metadata: bool,
 }
 
 impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
-    pub fn new() -> OrderedCollector<'a,X> {
+    pub fn new(load_metadata: bool) -> OrderedCollector<'a,X> {
         OrderedCollector {
-            traversal: Vec::with_capacity(5000),
+            traversal: std::collections::LinkedList::new(),
+            load_metadata: load_metadata,
         }
     }
 
-    pub fn finalize(self) -> Vec<SearchHit<'a,X>> {
+    pub fn finalize(self) -> std::collections::LinkedList<SearchHit<'a,X>> {
         self.traversal
     }
 
-    pub fn insert_all(&mut self,idx: &'a [DocumentInfo], word_index: i32, word_pos: &[&'a [u32]], buffer: &'a [u8]) {
+    pub fn insert_all<'b: 'a>(&mut self,idx: &'a [DocumentInfo], word_index: std::rc::Rc<(String,u64,u8)>, word_pos: &[&'a [u32]], buffer: &'a [u8]) {
         for x in 0..idx.len() {
             let information = MemBufferReader::new(&buffer[idx[x].doc_ptr as usize..]).unwrap();
+            let meta = if self.load_metadata {
+                    Some(information.load_serde_entry::<X>(0).unwrap())
+                }
+                else {
+                    None
+                };
+
             let search = SearchHit {
                 doc_ptr: idx[x].doc_ptr,
-                metadata: information.load_serde_entry::<X>(0).unwrap(),
+                metadata: meta,
                 body: information.load_entry(1).unwrap(),
-                doc_score: 0.0,
-                matched_words: vec![word_index],
+                doc_score: idx[x].doc_freq,
+                matched_words: vec![word_index.clone()],
                 positions: vec![word_pos[x]]
             };
-            self.traversal.push(search);
+            self.traversal.push_back(search);
         }
     }
     
-    pub fn add_array(&mut self, idx: &'a [DocumentInfo], word_index: i32, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
+    pub fn add_array<'b: 'a>(&mut self, idx: &'a [DocumentInfo], word_index: std::rc::Rc<(String,u64,u8)>, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
         if self.traversal.len() == 0 {
             self.insert_all(idx, word_index, &word_pos[..], buffer);
             return ();
         }
 
-        let mut cursor_front = 0;
+        let mut cursor_front = self.traversal.cursor_front_mut();
         let mut index_other = 0;
-        loop {
-            if cursor_front < self.traversal.len() {
-                let curr_doc_info = &mut self.traversal[cursor_front];
-                let curr_ptr = curr_doc_info.doc_ptr;
-                if curr_ptr < idx[index_other].doc_ptr {
-                    cursor_front+=1;
-                    continue;
-                }
-                else if curr_ptr == idx[index_other].doc_ptr {
-                    curr_doc_info.matched_words.push(word_index);
-                    curr_doc_info.positions.push(word_pos[index_other]);
-                }
-                else {
-                    let information = MemBufferReader::new(&buffer[idx[index_other].doc_ptr as usize..]).unwrap();
-                    let x = SearchHit {
-                        doc_ptr: idx[index_other].doc_ptr,
-                        metadata: information.load_serde_entry::<X>(0).unwrap(),
-                        body: information.load_entry(1).unwrap(),
-                        doc_score: 0.0,
-                        matched_words: vec![word_index],
-                        positions: vec![word_pos[index_other]]
-                    };
-                    self.traversal.insert(cursor_front,x);
-                }
-
-                index_other+=1;
-                if index_other >= idx.len() {
-                    break;
-                }
+        while let Some(curr_doc_info) = cursor_front.current() {
+            let curr_ptr = curr_doc_info.doc_ptr.clone();
+            if curr_ptr < idx[index_other].doc_ptr {
+                cursor_front.move_next();
+                continue;
+            }
+            else if curr_ptr == idx[index_other].doc_ptr {
+                curr_doc_info.matched_words.push(word_index.clone());
+                curr_doc_info.positions.push(word_pos[index_other]);
+                curr_doc_info.doc_score*=idx[index_other].doc_freq;
             }
             else {
-                if index_other < idx.len() {
-                    println!("Before insert all {}",self.traversal.len());
-                    self.insert_all(&idx[index_other..], word_index, &word_pos[index_other..], buffer);
-                }
+                let information = MemBufferReader::new(&buffer[idx[index_other].doc_ptr as usize..]).unwrap();
+                let meta = if self.load_metadata {
+                        Some(information.load_serde_entry::<X>(0).unwrap())
+                    }
+                    else {
+                        None
+                    };
+
+                let x = SearchHit {
+                    doc_ptr: idx[index_other].doc_ptr,
+                    metadata: meta,
+                    body: information.load_entry(1).unwrap(),
+                    doc_score: 0.0,
+                    matched_words: vec![word_index.clone()],
+                    positions: vec![word_pos[index_other]]
+                };
+                cursor_front.insert_before(x);
+            }
+
+            index_other+=1;
+            if index_other >= idx.len() {
                 break;
             }
+        }
+        if index_other < idx.len() {
+            self.insert_all(&idx[index_other..], word_index, &word_pos[index_other..], buffer);
         }
     }
 }
@@ -118,7 +128,7 @@ struct IndexWriterLazy {
 struct IndexInformations {
     index: std::collections::BTreeMap<String,IndexWriterLazy>,
     document_length: std::collections::BTreeMap<u64,u32>,
-    document_count: u64,
+    document_count: u32,
 }
 
 struct IndexMemmapWriter {
@@ -185,7 +195,7 @@ impl IndexMemmapWriter {
         self.values.index.len()
     }
 
-    pub fn doc_count(&self) -> u64 {
+    pub fn doc_count(&self) -> u32 {
         self.values.document_count
     }
 
@@ -235,7 +245,6 @@ impl IndexMemmapWriter {
 
     pub fn write(&mut self) {
         // This is where we'll write our map to.
-
         let wtr = io::BufWriter::new(File::create(std::path::Path::new(&self.directory).join("finite_state_machine.fst")).unwrap());
 
 
@@ -253,7 +262,7 @@ impl IndexMemmapWriter {
             for (x,positions) in value.position_list.iter() {
                 documents.push(DocumentInfo {
                     doc_ptr: *x,
-                    doc_freq: positions.len() as f32/(*self.values.document_length.get(x).unwrap() as f32),
+                    doc_freq: (positions.len() as f32/(*self.values.document_length.get(x).unwrap() as f32))*(self.doc_count() as f32 / value.position_list.len() as f32),
                 });
                 writer2.add_entry(&positions[..]);
             }
@@ -311,20 +320,21 @@ struct IndexMmapReader {
     document_terms: memmap::Mmap,
     automaton: fst::Map<memmap::Mmap>,
     dist: LevenshteinAutomatonBuilder,
+    load_metadata: bool,
 }
 
 struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
-    doc_ptr: u64,
-    metadata: X,
-    body: &'a str,
-    doc_score: f32,
-    matched_words: Vec<i32>,
-    positions: Vec<&'a [u32]>,
+    pub doc_ptr: u64,
+    pub metadata: Option<X>,
+    pub body: &'a str,
+    pub doc_score: f32,
+    pub matched_words: Vec<std::rc::Rc<(String,u64,u8)>>,
+    pub positions: Vec<&'a [u32]>,
 }
 
 struct DocumentSearchResult<'a,X: Serialize+Deserialize<'a>> {
-    map_of_ids: Vec<SearchHit<'a,X>>,
-    matched_words: Vec<(String, u64, u32)>,
+    map_of_ids: std::collections::LinkedList<SearchHit<'a,X>>,
+    matched_words: Vec<std::rc::Rc<(String,u64,u8)>>
 }
 
 impl<'a> IndexMmapReader {
@@ -335,44 +345,54 @@ impl<'a> IndexMmapReader {
             document_contents: unsafe{Mmap::map(&File::open(path.join("doc_content.bin")).unwrap()).unwrap()},
             document_terms: unsafe{Mmap::map(&File::open(path.join("term_index.bin")).unwrap()).unwrap()},
             automaton: Map::new(file).unwrap(),
-            dist: LevenshteinAutomatonBuilder::new(1, true)
+            dist: LevenshteinAutomatonBuilder::new(1, true),
+            load_metadata: true,
         }
-        
     }
 
-    pub fn search<X: Serialize+Deserialize<'a>>(&'a self,string: &str,max_results: usize) -> DocumentSearchResult<'a, X> {
+    pub fn with_metadata(mut self, load_metadata: bool) -> Self {
+        self.load_metadata = load_metadata;
+        self
+    }
+
+    pub fn search<X: Serialize+Deserialize<'a>>(&'a self,string: &str) -> DocumentSearchResult<'a, X> {
         let dfa = DFAWrapper(self.dist.build_dfa(string));
         let mut result = self.automaton.search_with_state(&dfa).into_stream();
         let val : &[u8] = &self.document_terms;
 
-        let mut orderedcoll: OrderedCollector<'a,X> = OrderedCollector::new();
-        let mut stream_result : Vec<(String,u64,u32)> = Vec::with_capacity(100);
+        let mut orderedcoll: OrderedCollector<'a,X> = OrderedCollector::new(self.load_metadata);
 
-        let mut counter = 0;
+
+        let mut sorted_states:Vec<std::rc::Rc<(String,u64,u8)>> = Vec::with_capacity(100);
         while let Some((key_u8,value,state)) = result.next() {
             let key = unsafe{std::str::from_utf8_unchecked(key_u8).to_string()};
             match dfa.0.distance(state) {
-                Distance::Exact(a) => {stream_result.push((key,value,state))},
+                Distance::Exact(a) => {sorted_states.push(std::rc::Rc::new((key,value,a)))},
                 _ => {}
             }
+        }
+        sorted_states.sort_by(|x,y| {x.2.cmp(&y.2)});
 
-            let reader = MemBufferReader::new(&val[value as usize..]).unwrap();
+        let mut return_value : DocumentSearchResult<'a,X> = DocumentSearchResult {
+            map_of_ids: std::collections::LinkedList::new(),
+            matched_words: sorted_states
+        };
+        println!("Found the following {:?}",return_value.matched_words);
+
+        let mut counter = 0;
+        for value in return_value.matched_words.iter() {
+            let reader = MemBufferReader::new(&val[value.1 as usize..]).unwrap();
             let val: DocumentCollection = reader.load_entry(reader.len()-1).unwrap();
             let mut docs : Vec<&'a [u32]> = Vec::with_capacity(val.docs.len());
 
-            println!("Sending {} docs",val.docs.len());
             for x in 0..val.docs.len() {
                 docs.push(reader.load_entry(x).unwrap());
             }
 
-            orderedcoll.add_array(val.docs, counter, docs, &self.document_contents);
-            println!("total len: {}",orderedcoll.traversal.len());
+            orderedcoll.add_array(val.docs, return_value.matched_words[counter].clone(), docs, &self.document_contents);
             counter+=1;
         }
-        let return_value : DocumentSearchResult<'a,X> = DocumentSearchResult {
-            map_of_ids: orderedcoll.finalize(),
-            matched_words: stream_result
-        };
+        return_value.map_of_ids = orderedcoll.finalize();
         return_value
    }
 }
@@ -405,8 +425,12 @@ mod tests {
         }
         new_writer.commit();
 
-        let reader = IndexMmapReader::new("big_data");
-        let results = reader.search::<DocumentMeta>("intel",0);
+        let mut reader = IndexMmapReader::new("big_data");
+        let results = reader.search::<DocumentMeta>("intel");
+    }
+
+    #[test]
+    fn check_second_search() {
     }
 }
 
@@ -451,6 +475,13 @@ mod bench {
             title: "The modern Intel System Environment",
             path: "main.txt"
         };
+        new_writer.add_document("zand is indeed very nice", &doc);
+        new_writer.add_document("yand is indeed very nice", &doc);
+        new_writer.add_document("xand is indeed very nice", &doc);
+        new_writer.add_document("gand is indeed very nice", &doc);
+        new_writer.add_document("tand is indeed very nice", &doc);
+        new_writer.add_document("rand is indeed very nice", &doc);
+        new_writer.add_document("sand is indeed very nice", &doc);
         new_writer.add_document(&hugestring,&doc);
         new_writer.add_document(&hugestring,&doc);
         new_writer.add_document(&hugestring1,&doc);
@@ -462,16 +493,17 @@ mod bench {
         for x in 0..100_000 {
             new_writer.add_document("Hello how are you? I am very well and look forward to relaxing with you like a lot, this could happen a lot more often.", &doc);
         }
+
         new_writer.commit();
 
         b.iter(|| {
-            let reader = IndexMmapReader::new("big_data");
-            let result = reader.search::<DocumentMeta>("and",0);
+            let reader = IndexMmapReader::new("big_data").with_metadata(true);
+            let result = reader.search::<DocumentMeta>("and");
+            assert_eq!(result.map_of_ids.len(),100_021);
             let mut score = 0.0;
             for x in result.map_of_ids.iter() {
                 score+=x.doc_score;
             }
         });
     }
-
 }
