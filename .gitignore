@@ -19,4 +19,5 @@ big_data/*
 main.txt
 second.txt
 third.txt
+fuchs/*
 #Cargo.lock
