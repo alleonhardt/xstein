@@ -1,5 +1,4 @@
 #![cfg_attr(feature = "bench", feature(test))]
-#![feature(linked_list_cursors)]
 
 #[cfg(feature = "bench")]
 extern crate test;
