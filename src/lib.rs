@@ -1,5 +1,4 @@
 #![cfg_attr(feature = "bench", feature(test))]
-#![feature(hash_set_entry)]
 
 #[cfg(feature = "bench")]
 extern crate test;
