@@ -1,4 +1,5 @@
 #![cfg_attr(feature = "bench", feature(test))]
+#![feature(hash_set_entry)]
 
 #[cfg(feature = "bench")]
 extern crate test;
@@ -588,11 +589,6 @@ impl fst::Automaton for DFAWrapper {
 }
 
 
-pub enum QueryOperation {
-    Or,
-    And
-}
-
 enum QueryOperationSettings {
     LevenstheinDistance1,
     LevenstheinDistance2,
@@ -604,6 +600,7 @@ enum QueryOperationSettings {
 pub struct Query<'a> {
     query: &'a str,
     query_settings: QueryOperationSettings,
+    query_id: usize,
     boost_factor: f32,
     target_index: Vec<i32>,
 }
@@ -623,6 +620,7 @@ impl<'a> Query<'a> {
             query: query,
             query_settings: settings,
             target_index: Vec::new(),
+            query_id: 0,
             boost_factor: 1.0,
         }
     }
@@ -673,7 +671,7 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
         self.traversal
     }
 
-    pub fn create_one<'b: 'a>(&self,idx: &'a DocumentTermInfo, word_index: std::rc::Rc<(String,u64,u8)>, word_pos: &'a [u32], buffer: &'a [u8]) -> SearchHit<'a,X> {
+    pub fn create_one<'b: 'a>(&self,idx: &'a DocumentTermInfo, word_index: std::rc::Rc<(String,u64,u8,usize)>, word_pos: &'a [u32], buffer: &'a [u8]) -> SearchHit<'a,X> {
         let information = MemBufferReader::new(&buffer[idx.doc_ptr as usize..]).unwrap();
         let meta = if self.load_metadata {
             Some(information.load_serde_entry::<X>(information.len()-1).unwrap())
@@ -693,28 +691,29 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
             if y as i32 == self.index {
                 search.index_hits.push(IndexHit {
                     content: information.load_entry(y).unwrap(),
-                    matched_words: vec![word_index.clone()],
-                    positions: vec![word_pos],
+                    hit_descriptions: vec![HitDescription{
+                        word_info: word_index.clone(),
+                        word_positions: word_pos
+                    }]
                 });
             }
             else {
                 search.index_hits.push(IndexHit {
                     content: information.load_entry(y).unwrap(),
-                    matched_words: Vec::new(),
-                    positions: Vec::new(),
-                });
+                    hit_descriptions: Vec::new(),
+                });            
             }
         }
         search
     }
 
-    pub fn insert_all<'b: 'a>(&mut self,idx: &'a [DocumentTermInfo], word_index: std::rc::Rc<(String,u64,u8)>, word_pos: &[&'a [u32]], buffer: &'a [u8]) {
+    pub fn insert_all<'b: 'a>(&mut self,idx: &'a [DocumentTermInfo], word_index: std::rc::Rc<(String,u64,u8,usize)>, word_pos: &[&'a [u32]], buffer: &'a [u8]) {
         for x in 0..idx.len() {
             self.traversal.push(self.create_one(&idx[x], word_index.clone(), word_pos[x], buffer));
         }
     }
     
-    pub fn add_array<'b: 'a>(&mut self, idx: &'a [DocumentTermInfo], word_index: std::rc::Rc<(String,u64,u8)>, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
+    pub fn add_array<'b: 'a>(&mut self, idx: &'a [DocumentTermInfo], word_index: std::rc::Rc<(String,u64,u8,usize)>, word_pos: Vec<&'a [u32]>, buffer: &'a [u8]) {
         let mut index_own = 0;
         let mut index_other = 0;
         loop {
@@ -734,8 +733,10 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
             }
             else if curr_ptr == idx[index_other].doc_ptr {
                 let ptr = &mut self.traversal[index_own].index_hits[self.index as usize];
-                ptr.matched_words.push(word_index.clone());
-                ptr.positions.push(word_pos[index_other]);
+                ptr.hit_descriptions.push(HitDescription {
+                    word_info: word_index.clone(),
+                    word_positions: word_pos[index_other]
+                });
                 self.traversal[index_own].doc_score+=self.boost_factor*idx[index_other].doc_freq/((word_index.2+1) as f32);
                 index_own+=1;
             }
@@ -750,11 +751,118 @@ impl<'a,X: Serialize+Deserialize<'a>> OrderedCollector<'a,X> {
 }
 
 
+pub struct HitDescription<'a> {
+    pub word_info: std::rc::Rc<(String,u64,u8,usize)>,
+    pub word_positions: &'a [u32],
+}
 
 pub struct IndexHit<'a> {
     pub content: &'a str,
-    pub matched_words: Vec<std::rc::Rc<(String,u64,u8)>>,
-    pub positions: Vec<&'a [u32]>,
+    pub hit_descriptions: Vec<HitDescription<'a>>,
+}
+
+impl<'a> IndexHit<'a> {
+    pub fn sort_by_match_proximity(&mut self) {
+        //Smaller is better!
+        self.hit_descriptions.sort_by(|x,y|{y.word_info.2.cmp(&x.word_info.2)});
+    }
+}
+
+pub enum PreviewBoundary {
+    OuterWords,
+    MaxDistance,
+    SentenceBoundary,
+    BoundedSentenceBoundary(u32),
+    MaximizedSentenceBoundary(u32),
+}
+
+pub struct PreviewOptions<'a> {
+    map_func: Box<dyn FnMut(&str)->String+'a>,
+    best_match: bool,
+    max_distance: u32,
+    boundary: PreviewBoundary,
+}
+
+impl<'a> PreviewOptions<'a> {
+    pub fn new() -> PreviewOptions<'a> {
+        PreviewOptions {
+            map_func: Box::new(|x|{x.to_string()}),
+            best_match: false,
+            max_distance: std::u32::MAX,
+            boundary: PreviewBoundary::OuterWords,
+        }
+    }
+
+    fn retrieve_preview<'b>(&self, content: &'b str, start: u32, end: u32) -> &'b str {
+        match self.boundary {
+            PreviewBoundary::OuterWords => &content[start as usize..end as usize],
+            PreviewBoundary::SentenceBoundary => {
+                let new_start = content[..start as usize].rfind(&['.','!','?'][..]);
+                let new_end = content[end as usize..].find(&['.','!','?'][..]);
+                &content[new_start.unwrap_or(0)..new_end.map(|x|x+1+end as usize).unwrap_or(content.len())]
+            },
+            PreviewBoundary::MaxDistance => {
+                let dist = end - start;
+                let mut new_start = start.checked_sub((self.max_distance-dist)/2).unwrap_or(0);
+                let mut new_end = std::cmp::min(end.checked_add((self.max_distance-dist)/2).unwrap() as usize,content.len());
+                while !content.is_char_boundary(new_start as usize) {
+                    new_start-=1;
+                }
+                while !content.is_char_boundary(new_end) {
+                    new_end+=1;
+                }
+                &content[new_start as usize..new_end]
+            },
+            PreviewBoundary::BoundedSentenceBoundary(dist) => {
+                let mut bounding_start = start.checked_sub(dist).unwrap_or(0);
+                let mut bounding_end = std::cmp::min(end.checked_add(dist).unwrap() as usize,content.len());
+                while !content.is_char_boundary(bounding_start as usize) {
+                    bounding_start-=1;
+                }
+                while !content.is_char_boundary(bounding_end) {
+                    bounding_end+=1;
+                }
+
+                let new_start = content[bounding_start as usize..start as usize].rfind(&['.','!','?'][..]);
+                let new_end = content[end as usize..bounding_end].find(&['.','!','?'][..]);
+                &content[new_start.unwrap_or(bounding_start as usize)..new_end.map(|x|x+1+end as usize).unwrap_or(bounding_end)]
+            }
+            PreviewBoundary::MaximizedSentenceBoundary(dist) => {
+                let mut bounding_start = start.checked_sub(dist).unwrap_or(0);
+                let mut bounding_end = std::cmp::min(end.checked_add(dist).unwrap() as usize,content.len());
+                while !content.is_char_boundary(bounding_start as usize) {
+                    bounding_start-=1;
+                }
+                while !content.is_char_boundary(bounding_end) {
+                    bounding_end+=1;
+                }
+
+                let new_start = content[bounding_start as usize..start as usize].find(&['.','!','?'][..]);
+                let new_end = content[end as usize..bounding_end].rfind(&['.','!','?'][..]);
+                &content[new_start.unwrap_or(bounding_start as usize)..new_end.map(|x|x+1+end as usize).unwrap_or(bounding_end)]
+            }
+        }
+    }
+
+    pub fn boundary(mut self, boundary: PreviewBoundary) -> Self {
+        self.boundary = boundary;
+        self
+    }
+
+    pub fn match_best(mut self, best: bool) -> Self {
+        self.best_match = best;
+        self
+    }
+
+    pub fn max_distance(mut self, value: u32) -> Self {
+        self.max_distance = value;
+        self
+    }
+
+    pub fn on_highlight<F: 'a+FnMut(&str)->String>(mut self, func: F) -> Self {
+        self.map_func = Box::new(func);
+        self
+    }
 }
 
 
@@ -765,19 +873,128 @@ pub struct SearchHit<'a,X: Serialize+Deserialize<'a>> {
     pub index_hits: Vec<IndexHit<'a>>,
 }
 
+impl<'a,X: Serialize+Deserialize<'a>> SearchHit<'a,X> {
+    fn calculate_distance(val: &Vec<u32>, hits: &Vec<&HitDescription>) -> (u32, u32) {
+        let mut min = std::u32::MAX;
+        let mut max = 0;
+        for x in 0..val.len() {
+            if val[x] < min {
+                min = val[x];
+            }
+            if val[x] > max {
+                max = val[x]+hits[x].word_info.0.len() as u32;
+            }
+        }
+        (min,max)
+    }
+
+    fn create_preview_on_hits<'options_livetime>(content: &str, hits: &Vec<&HitDescription>, options: &PreviewOptions<'options_livetime>) -> Option<String> {
+        let max_size = hits.iter().map(|x| x.word_positions.len()).sum();
+        let mut min_heap = std::collections::BinaryHeap::with_capacity(max_size);
+        let mut min_dist_heap = std::collections::BinaryHeap::with_capacity(max_size);
+        let mut vec = Vec::with_capacity(hits.len());
+
+        for x in 0..hits.len() {
+            vec.push(hits[x].word_positions[0]);
+            for value in hits[x].word_positions.iter().rev() {
+                min_heap.push(HeapIndexValue {
+                    value: *value,
+                    index: x
+                });
+            }
+        }
+
+        while let Some(min) = min_heap.pop() {
+            vec[min.index] = min.value;
+            let (min,max) = SearchHit::<Index>::calculate_distance(&vec,hits);
+            let distance = max-min;
+            if !options.best_match && distance < options.max_distance {
+                return Some(options.retrieve_preview(content,min,max).to_string())
+            }
+            min_dist_heap.push(HeapIndexValue {
+                value: distance,
+                index: min as usize,
+            });
+        }
+        let result = min_dist_heap.peek().unwrap();
+        if result.value > options.max_distance {
+            return None;
+        }
+        Some(options.retrieve_preview(content,result.index as u32,result.value).to_string())
+    }
+
+    pub fn create_preview<'options_livetime, T: Into<i32>>(&self, on_index: T, opts: Option<PreviewOptions<'options_livetime>>) -> Option<String> {
+        let mut preview_options = opts.unwrap_or(PreviewOptions::new());
+
+        let index = on_index.into() as usize;
+        let mut checker: std::collections::HashMap<usize,&HitDescription<'a>> = std::collections::HashMap::new();
+        for x in self.index_hits[index].hit_descriptions.iter() {
+            if let Some(val) = checker.get(&x.word_info.3) {
+                if val.word_info.2 > x.word_info.2 {
+                    checker.insert(x.word_info.3,x);
+                }
+            }
+            else {
+                checker.insert(x.word_info.3,x);
+            }
+        }
+        let mut preview = Vec::with_capacity(checker.len());
+        for (_,value) in checker.iter() {
+            preview.push(*value);
+        }
+        let mut prev = SearchHit::<Index>::create_preview_on_hits(self.index_hits[index].content,&preview,&preview_options)?;
+        
+        for x in preview.iter() {
+            prev = prev.replace(&x.word_info.0, &(*preview_options.map_func)(&x.word_info.0));
+        }
+        Some(prev)
+    }
+}
+
 pub struct DocumentSearchResult<'a,X: Serialize+Deserialize<'a>> {
     pub hits: Vec<SearchHit<'a,X>>,
 }
 
+
+#[derive(Eq)]
+pub struct HeapIndexValue {
+    value: u32,
+    index: usize,
+}
+
+impl std::cmp::PartialEq for HeapIndexValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl std::cmp::PartialOrd for HeapIndexValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(other.value.cmp(&self.value))
+    }
+}
+
+impl std::cmp::Ord for HeapIndexValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.value.cmp(&self.value)
+    }
+}
+
 impl<'a,X:Serialize+Deserialize<'a>> DocumentSearchResult<'a,X> {
-    pub fn sort_by_score(&mut self) {
+    pub fn sort_by_score(mut self) -> Self {
         self.hits.sort_by(|x,y|{x.doc_score.partial_cmp(&y.doc_score).unwrap_or(std::cmp::Ordering::Equal)});
+        self
     }
 
-    pub fn limit(&mut self, limit: usize) {
+    pub fn get<T: Into<i32>>(&self, index: T) -> &SearchHit<'a,X> {
+        &self.hits[index.into() as usize]
+    }
+
+    pub fn limit(mut self, limit: usize) -> Self {
         if self.hits.len() > limit {
             self.hits.drain(limit..);
         }
+        self
     }
 
     pub fn and(mut self, mut other: DocumentSearchResult<'a,X>) -> DocumentSearchResult<'a,X> {
@@ -800,8 +1017,7 @@ impl<'a,X:Serialize+Deserialize<'a>> DocumentSearchResult<'a,X> {
             else if self.hits[index_own].doc_ptr == other.hits[index_other].doc_ptr {
                 self.hits[index_own].doc_score += other.hits[index_other].doc_score;
                 for hit in 0..other.hits[index_other].index_hits.len() {
-                    self.hits[index_own].index_hits[hit].positions.append(&mut other.hits[index_other].index_hits[hit].positions);
-                    self.hits[index_own].index_hits[hit].matched_words.append(&mut other.hits[index_other].index_hits[hit].matched_words);
+                    self.hits[index_own].index_hits[hit].hit_descriptions.append(&mut other.hits[index_other].index_hits[hit].hit_descriptions);
                 }
                 index_own+=1;
             }
@@ -829,8 +1045,7 @@ impl<'a,X:Serialize+Deserialize<'a>> DocumentSearchResult<'a,X> {
             else if self.hits[index_own].doc_ptr == other.hits[index_other].doc_ptr {
                 self.hits[index_own].doc_score += other.hits[index_other].doc_score;
                 for hit in 0..other.hits[index_other].index_hits.len() {
-                    self.hits[index_own].index_hits[hit].positions.append(&mut other.hits[index_other].index_hits[hit].positions);
-                    self.hits[index_own].index_hits[hit].matched_words.append(&mut other.hits[index_other].index_hits[hit].matched_words);
+                    self.hits[index_own].index_hits[hit].hit_descriptions.append(&mut other.hits[index_other].index_hits[hit].hit_descriptions);
                 }
                 index_own+=1;
             }
@@ -852,6 +1067,7 @@ pub struct IndexReader<'a> {
     data: &'a [u8],
     index_data: std::collections::HashMap<i32,(&'a [u8], &'a [u8])>,
     load_metadata: bool,
+    query_id: std::sync::atomic::AtomicUsize,
 }
 
 
@@ -868,6 +1084,7 @@ impl<'a> IndexReader<'a> {
             data: data,
             index_data: index_data,
             load_metadata: false,
+            query_id: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -880,6 +1097,7 @@ impl<'a> IndexReader<'a> {
     }
 
     pub fn search_query<X: Serialize+Deserialize<'a>>(&'a self, mut query: Query<'a>) -> Result<DocumentSearchResult<'a,X>,std::io::Error> {
+        query.query_id = self.query_id.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
         let mut result: DocumentSearchResult<'a,X> = DocumentSearchResult {
             hits: Vec::new()
         };
@@ -893,7 +1111,7 @@ impl<'a> IndexReader<'a> {
                 result = result.or(match query.query_settings {
                     QueryOperationSettings::Exact => {
                         self.load_hits(
-                            self.do_search_in_index(fst::automaton::Str::new(query.query),index_automaton)?,
+                            self.do_search_in_index(fst::automaton::Str::new(query.query),index_automaton,query.query_id)?,
                             *index,
                             index_data,
                             query.boost_factor
@@ -901,7 +1119,7 @@ impl<'a> IndexReader<'a> {
                     },
                     QueryOperationSettings::LevenstheinDistance1 => {
                         self.load_hits(
-                            self.do_search_in_index_levensthein(query.query,1,index_automaton)?,
+                            self.do_search_in_index_levensthein(query.query,1,index_automaton,query.query_id)?,
                             *index,
                             index_data,
                             query.boost_factor
@@ -909,7 +1127,7 @@ impl<'a> IndexReader<'a> {
                     },
                     QueryOperationSettings::LevenstheinDistance2 => {
                         self.load_hits(
-                            self.do_search_in_index_levensthein(query.query,2,index_automaton)?,
+                            self.do_search_in_index_levensthein(query.query,2,index_automaton,query.query_id)?,
                             *index,
                             index_data,
                             query.boost_factor
@@ -917,7 +1135,7 @@ impl<'a> IndexReader<'a> {
                     },
                     QueryOperationSettings::StartsWith => {
                         self.load_hits(
-                            self.do_search_in_index(fst::automaton::Str::new(query.query).starts_with(),index_automaton)?,
+                            self.do_search_in_index(fst::automaton::Str::new(query.query).starts_with(),index_automaton,query.query_id)?,
                             *index,
                             index_data,
                             query.boost_factor
@@ -932,7 +1150,7 @@ impl<'a> IndexReader<'a> {
         Ok(result)
     }
 
-    fn do_search_in_index_levensthein(&'a self,  query: &'a str, distance: u8, index_automaton: &'a [u8]) -> Result<Vec<std::rc::Rc<(String,u64,u8)>>,std::io::Error> {
+    fn do_search_in_index_levensthein(&'a self,  query: &'a str, distance: u8, index_automaton: &'a [u8], query_id: usize) -> Result<Vec<std::rc::Rc<(String,u64,u8,usize)>>,std::io::Error> {
         let load_automaton = fst::Map::new(index_automaton).unwrap();
         let auto = if distance == 1 {
             DFAWrapper(AUTOMATON_DIST_1.build_dfa(query))
@@ -943,11 +1161,11 @@ impl<'a> IndexReader<'a> {
 
         let mut result = load_automaton.search_with_state(&auto).into_stream();
         
-        let mut sorted_states:Vec<std::rc::Rc<(String,u64,u8)>> = Vec::with_capacity(100);
+        let mut sorted_states:Vec<std::rc::Rc<(String,u64,u8,usize)>> = Vec::with_capacity(100);
         while let Some((key_u8,value,state)) = result.next() {
             let key = unsafe{std::str::from_utf8_unchecked(key_u8).to_string()};
             match auto.0.distance(state) {
-                Distance::Exact(a) => {sorted_states.push(std::rc::Rc::new((key,value,a)))},
+                Distance::Exact(a) => {sorted_states.push(std::rc::Rc::new((key,value,a,query_id)))},
                 _ => {}
             }
         }
@@ -955,19 +1173,19 @@ impl<'a> IndexReader<'a> {
         Ok(sorted_states)
     }
 
-    fn do_search_in_index<A: fst::Automaton>(&'a self, automaton: A,index_automaton: &'a [u8]) -> Result<Vec<std::rc::Rc<(String,u64,u8)>>,std::io::Error> {
+    fn do_search_in_index<A: fst::Automaton>(&'a self, automaton: A,index_automaton: &'a [u8], query_id: usize) -> Result<Vec<std::rc::Rc<(String,u64,u8,usize)>>,std::io::Error> {
         let load_automaton = fst::Map::new(index_automaton).unwrap();
 
         let mut return_value = Vec::with_capacity(100);
         let mut result = load_automaton.search(automaton).into_stream();
         while let Some((key_u8,value)) = result.next() {
             let key = unsafe{std::str::from_utf8_unchecked(key_u8).to_string()};
-            return_value.push(std::rc::Rc::new((key,value,0)));
+            return_value.push(std::rc::Rc::new((key,value,0,query_id)));
         }
         Ok(return_value)
     }
 
-    pub fn load_hits<X: Serialize+Deserialize<'a>>(&'a self, matches: Vec<std::rc::Rc<(String,u64,u8)>>, index: i32, val: &'a [u8], boost_factor: f32) -> Result<DocumentSearchResult<'a, X>,std::io::Error> 
+    pub fn load_hits<X: Serialize+Deserialize<'a>>(&'a self, matches: Vec<std::rc::Rc<(String,u64,u8,usize)>>, index: i32, val: &'a [u8], boost_factor: f32) -> Result<DocumentSearchResult<'a, X>,std::io::Error> 
         {
         let mut orderedcoll: OrderedCollector<'a,X> = OrderedCollector::new(self.load_metadata, index, boost_factor);
 
@@ -990,7 +1208,7 @@ impl<'a> IndexReader<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document,RAMFilesystem,Filesystem,Index,IndexWriter,Query,MMapedFilesystem,IndexReader,RawTokenizer,Tokenizer,filter_long};
+    use super::{Document,RAMFilesystem,Filesystem,Index,IndexWriter,Query,MMapedFilesystem,IndexReader,RawTokenizer,Tokenizer,filter_long,PreviewOptions,PreviewBoundary};
     use serde::{Serialize,Deserialize};
     
     #[derive(Serialize,Deserialize)]
@@ -1293,22 +1511,22 @@ mod tests {
             let query2 = Query::exact("hello").target(IndexEnum::Title).boost(2.0);
             let mut result = reader.search::<DocumentMeta>(query).unwrap();
             let mut result2 = reader.search::<DocumentMeta>(query2).unwrap();
-            result.sort_by_score();
-            result2.sort_by_score();
+            result = result.sort_by_score();
+            result2 = result2.sort_by_score();
             assert_eq!(result.hits[0].doc_score*2.0, result2.hits[0].doc_score);
         }
         
         {
             let query = Query::fuzzy("hello",1).target(IndexEnum::Title);
             let mut result = reader.search::<DocumentMeta>(query).unwrap();
-            result.sort_by_score();
+            result = result.sort_by_score();
             assert_eq!(result.hits.len(),3);
         }
 
         {
             let query = Query::fuzzy("hello",2).target(IndexEnum::Title);
             let mut result = reader.search::<DocumentMeta>(query).unwrap();
-            result.sort_by_score();
+            result = result.sort_by_score();
             assert_eq!(result.hits.len(),3);
         }
     }
@@ -1439,15 +1657,59 @@ mod tests {
 
         let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
         let query = Query::exact("hello").target(IndexEnum::Title);
-        let mut result = reader.search::<DocumentMeta>(query).unwrap();
+        let result = reader.search::<DocumentMeta>(query).unwrap();
         assert_eq!(result.hits.len(), 2);
-        result.limit(1);
-        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.limit(1).hits.len(), 1);
 
         
         let query2 = Query::exact("hello").target(IndexEnum::Body);
         let result2 = reader.search::<DocumentMeta>(query2);
         assert_eq!(result2.is_err(),true);
+    }
+
+
+    #[test]
+    pub fn check_preview() {
+        let mut mmaped = RAMFilesystem::new();
+        {
+            let mut index = IndexWriter::from_fs(&mut mmaped).unwrap();
+            index.add_index(IndexEnum::Body);
+            index.add_index(IndexEnum::Title);
+
+            let new_meta = DocumentMeta {
+                title: "Intel developers system manual",
+                path: "main.txt"
+            };
+
+            let mut new_doc = Document::new(&new_meta);
+            new_doc.add_field(IndexEnum::Title, "hello how are you?");
+            index.add_document(new_doc);
+
+            let mut new_doc2 = Document::new(&new_meta);
+            new_doc2.add_field(IndexEnum::Title, "This is a sad title with hello in it! For the sake of it hello sad.");
+            index.add_document(new_doc2);
+
+            let val = index.commit();
+            assert_eq!(val.is_err(),false);
+            assert_eq!(index.index_locked,true);
+        }
+
+        let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
+        let query = Query::exact("hello").target(IndexEnum::Title);
+        let result = reader.search::<DocumentMeta>(query).unwrap();
+        assert_eq!(result.hits.len(), 2);
+        
+        let query2 = Query::exact("sad").target(IndexEnum::Title);
+        let result2 = reader.search::<DocumentMeta>(query2);
+        assert_eq!(result2.is_err(),false);
+
+        let query3 = Query::exact("it").target(IndexEnum::Title);
+        let result3 = reader.search::<DocumentMeta>(query3);
+
+        let combined = result.and(result2.unwrap()).and(result3.unwrap()).sort_by_score();
+        let preview_options = PreviewOptions::new().match_best(false).on_highlight(|x|String::from("|")+x+"|").boundary(PreviewBoundary::BoundedSentenceBoundary(100));
+        let preview = combined.hits[0].create_preview(IndexEnum::Title,Some(preview_options)).unwrap();
+        assert_eq!("This is a |sad| t|it|le w|it|h |hello| in |it|!",preview);
     }
 }
 
@@ -1497,7 +1759,7 @@ mod bench {
                 new_writer.add_document(document);
             }
 
-            for _ in 0..100_000 {
+            for _ in 0..10_000 {
                 let mut document = Document::new(&doc);
                 document.add_field(IndexEnum::Body,"and is indeed very nice write a small text about the live of brian to check how the time changes if i use a lot more text which should lead to more cache misses in theory");
                 new_writer.add_document(document);
@@ -1510,7 +1772,7 @@ mod bench {
             let mut reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Body]).unwrap();
             reader.load_metadata(false);
             let result = reader.search::<DocumentMeta>(Query::fuzzy("and",1).target(IndexEnum::Body)).unwrap();
-            assert_eq!(result.hits.len(),100_010);
+            assert_eq!(result.hits.len(),10_010);
             let mut _score = 0.0;
             for x in result.hits.iter() {
                 _score+=x.doc_score;
