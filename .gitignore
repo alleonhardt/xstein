@@ -20,4 +20,6 @@ main.txt
 second.txt
 third.txt
 fuchs/*
+second/*
+bench_data/*
 #Cargo.lock
