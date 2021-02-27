@@ -634,11 +634,10 @@ impl<'a> Query<'a> {
     }
 
     pub fn fuzzy(query: &'a str, max_distance: u8) -> Query {
-        if max_distance == 1 {
-            Query::create_query_with_settings(query, QueryOperationSettings::LevenstheinDistance1)
-        }
-        else {
-            Query::create_query_with_settings(query, QueryOperationSettings::LevenstheinDistance2)
+        match max_distance {
+            1 => Query::create_query_with_settings(query, QueryOperationSettings::LevenstheinDistance1),
+            2 => Query::create_query_with_settings(query, QueryOperationSettings::LevenstheinDistance2),
+            _ => panic!("Levensthein distance query is only implemented for distance 1 and 2 since the construction of the automaton takes exponential time"),
         }
     }
 }
