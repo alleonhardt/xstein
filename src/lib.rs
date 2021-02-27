@@ -1103,7 +1103,7 @@ impl<'a> SearchHit<'a> {
         else {
             self.index_hits[index].hit_descriptions.iter().map(|x|x).collect()
         };
-        let (mut prev,matched_words) = SearchHit::create_preview_on_hits(self.index_hits[index].content,preview,&preview_options)?;
+        let (prev,matched_words) = SearchHit::create_preview_on_hits(self.index_hits[index].content,preview,&preview_options)?;
         
         let mut string_builder = String::new();
         for x in matched_words.iter() {
@@ -1119,8 +1119,7 @@ impl<'a> SearchHit<'a> {
                 .case_insensitive(true)
                 .build()
                 .expect("Invalid Regex");
-        prev = reg.replace_all(&prev,preview_options.map_func).to_string();
-        Some(prev)
+        Some(reg.replace_all(&prev,preview_options.map_func).to_string())
     }
 }
 
