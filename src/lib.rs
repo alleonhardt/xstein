@@ -596,7 +596,7 @@ pub struct Query<'a> {
     query_settings: QueryOperationSettings,
     query_id: usize,
     boost_factor: f32,
-    target_index: Vec<i32>,
+    target_index: Vec<(f32,i32)>,
 }
         
 lazy_static! { 
@@ -620,7 +620,12 @@ impl<'a> Query<'a> {
     }
 
     pub fn target<T: Into<i32>>(mut self,target: T) -> Query<'a> {
-        self.target_index.push(target.into());
+        self.target_index.push((1.0,target.into()));
+        self
+    }
+
+    pub fn weighted_target<T: Into<i32>>(mut self,target: T, weight: f32) -> Query<'a> {
+        self.target_index.push((weight,target.into()));
         self
     }
 
@@ -1267,6 +1272,51 @@ impl<'a> DocumentSearchResult<'a> {
             index_other+=1;
         }
     }
+
+    pub fn boost_score_merge(mut self, mut other: DocumentSearchResult<'a>) -> DocumentSearchResult<'a> {
+        let mut index_own = 0;
+        let mut index_other = 0;
+
+        loop {
+            if index_own == self.hits.len() || index_other>=other.hits.len() {
+                return self;
+            }
+
+            if self.hits[index_own].doc_ptr < other.hits[index_other].doc_ptr {
+                index_own+=1;
+                continue;
+            }
+            else if self.hits[index_own].doc_ptr == other.hits[index_other].doc_ptr {
+                self.hits[index_own].doc_score += other.hits[index_other].doc_score;
+                for hit in 0..other.hits[index_other].index_hits.len() {
+                    self.hits[index_own].index_hits[hit].hit_descriptions.append(&mut other.hits[index_other].index_hits[hit].hit_descriptions);
+                }
+                index_own+=1;
+            }
+            
+            index_other+=1;
+        }
+    }
+
+    pub fn not(mut self, other: DocumentSearchResult<'a>) -> DocumentSearchResult<'a> {
+        let mut index_own = 0;
+        let mut index_other = 0;
+
+        loop {
+            if index_own == self.hits.len() || index_other>=other.hits.len(){
+                return self;
+            }
+
+            if self.hits[index_own].doc_ptr < other.hits[index_other].doc_ptr {
+                index_own+=1;
+                continue;
+            }
+            else if self.hits[index_own].doc_ptr == other.hits[index_other].doc_ptr {
+                self.hits.remove(index_own);
+            }
+            index_other+=1;
+        }
+    }
 }
 
 pub struct IndexReader<'a> {
@@ -1303,48 +1353,48 @@ impl<'a> IndexReader<'a> {
         };
         
         if query.target_index.len() == 0 {
-            query.target_index = self.index_data.keys().map(|x|*x).collect();
+            query.target_index = self.index_data.keys().map(|x| (1.0,*x)).collect();
         }
 
         for index in query.target_index.iter() {
-            if let Some((index_automaton,index_data)) = self.index_data.get(&index) {
+            if let Some((index_automaton,index_data)) = self.index_data.get(&index.1) {
                 result = result.or(match query.query_settings {
                     QueryOperationSettings::Exact => {
                         self.load_hits(
                             self.do_search_in_index(fst::automaton::Str::new(query.query),index_automaton,query.query_id)?,
-                            *index,
+                            index.1,
                             index_data,
-                            query.boost_factor
+                            query.boost_factor*index.0
                         )
                     },
                     QueryOperationSettings::LevenstheinDistance1 => {
                         self.load_hits(
                             self.do_search_in_index_levensthein(query.query,1,index_automaton,query.query_id)?,
-                            *index,
+                            index.1,
                             index_data,
-                            query.boost_factor
+                            query.boost_factor*index.0
                         )
                     },
                     QueryOperationSettings::LevenstheinDistance2 => {
                         self.load_hits(
                             self.do_search_in_index_levensthein(query.query,2,index_automaton,query.query_id)?,
-                            *index,
+                            index.1,
                             index_data,
-                            query.boost_factor
+                            query.boost_factor*index.0
                         )
                     },
                     QueryOperationSettings::StartsWith => {
                         self.load_hits(
                             self.do_search_in_index(fst::automaton::Str::new(query.query).starts_with(),index_automaton,query.query_id)?,
-                            *index,
+                            index.1,
                             index_data,
-                            query.boost_factor
+                            query.boost_factor*index.0
                         )
                     }
                 }?);
             }
             else {
-                return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",index)));
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{:?}\"",index)));
             }
         }
         Ok(result)
@@ -2306,5 +2356,4 @@ mod bench {
             total+=result.len();
         });
     }
-
 }
