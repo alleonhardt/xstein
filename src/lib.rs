@@ -972,7 +972,7 @@ impl<'a> SearchHit<'a> {
         Some((best_score,winning_vec.iter().map(|x|x.hit.clone()).collect(),start,end))
     }
 
-    fn create_preview_on_hits<'options_livetime>(content: &str, hits: Vec<&'a HitDescription>, options: &PreviewOptions<'options_livetime>) -> Option<(String,Vec<&'a HitDescription<'a>>)> {
+    fn create_preview_on_hits<'options_livetime,'b>(content: &'b str, hits: Vec<&'a HitDescription>, options: &PreviewOptions<'options_livetime>) -> Option<(&'b str,Vec<&'a HitDescription<'a>>)> {
         let mut min_heap = std::collections::BinaryHeap::with_capacity(hits.len()+1);
         let mut indices = Vec::with_capacity(hits.len());
         let mut current_canidates = vec![std::u32::MAX;hits.len()];
@@ -1041,7 +1041,7 @@ impl<'a> SearchHit<'a> {
 
             if distance < options.max_distance as u32 && sorted_canidates.len() == hits.len() {
                 if !options.best_match {
-                    return Some((options.retrieve_preview(content,min_d as usize,max_d as usize).to_string(),hits));
+                    return Some((options.retrieve_preview(content,min_d as usize,max_d as usize),hits));
                 }
                 if distance < min_dist {
                     min_dist = distance;
@@ -1073,13 +1073,13 @@ impl<'a> SearchHit<'a> {
 
         if min_dist > options.max_distance as u32 {
             if options.allow_partial_match {
-                return Some((options.retrieve_preview(content,partial_start as usize,partial_end as usize).to_string(),partial_matches))
+                return Some((options.retrieve_preview(content,partial_start as usize,partial_end as usize),partial_matches))
             }
             else {
                 return None;
             }
         }
-        Some((options.retrieve_preview(content,start as usize,min_dist as usize+start as usize).to_string(),hits))
+        Some((options.retrieve_preview(content,start as usize,min_dist as usize+start as usize),hits))
     }
 
     pub fn create_preview<'options_livetime, T: Into<i32>>(&self, on_index: T, opts: Option<PreviewOptions<'options_livetime>>) -> Option<String> {
@@ -1109,21 +1109,23 @@ impl<'a> SearchHit<'a> {
         };
         let (prev,matched_words) = SearchHit::create_preview_on_hits(self.index_hits[index].content,preview,&preview_options)?;
         
-        let mut string_builder = String::new();
+        let mut string_builder = String::from(r"\b(");
         for x in matched_words.iter() {
             let escaped_string = regex::escape(&x.word_info.0);
-            if string_builder.len() == 0 {
-                string_builder = escaped_string;
+            if string_builder.len() == 3 {
+                string_builder = string_builder+&escaped_string;
             }
             else {
                 string_builder = string_builder+"|"+&escaped_string;
             }
         }
+        string_builder.push_str(r")\b");
+
         let reg = regex::RegexBuilder::new(&string_builder)
                 .case_insensitive(true)
                 .build()
                 .expect("Invalid Regex");
-        Some(reg.replace_all(&prev,preview_options.map_func).to_string())
+        Some(reg.replace_all(prev,preview_options.map_func).to_string())
     }
 }
 
@@ -2047,7 +2049,7 @@ mod tests {
         {
             let preview_options_maximised = PreviewOptions::new().match_best(false).on_highlight(|x|String::from("|")+x.get(0).unwrap().as_str()+"|").boundary(PreviewBoundary::MaximizedSentenceBoundary(100));
             let preview_words_max = combined.hits[0].create_preview(IndexEnum::Title,Some(preview_options_maximised)).unwrap();
-            assert_eq!("This is a |sad| t|it|le w|it|h |hello| in |it|! For the sake of |it| |hello| |sad|.",preview_words_max);
+            assert_eq!("This is a |sad| title with |hello| in |it|! For the sake of |it| |hello| |sad|.",preview_words_max);
         }
 
         {
