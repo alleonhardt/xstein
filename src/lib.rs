@@ -588,6 +588,7 @@ enum QueryOperationSettings {
     LevenstheinDistance2,
     StartsWith,
     Exact,
+    Subsequence
 }
 
 
@@ -631,6 +632,10 @@ impl<'a> Query<'a> {
 
     pub fn starts_with(query: &'a str) -> Query<'a> {
         Query::create_query_with_settings(query, QueryOperationSettings::StartsWith)
+    }
+
+    pub fn subsequence(query: &'a str) -> Query<'a> {
+        Query::create_query_with_settings(query, QueryOperationSettings::Subsequence)
     }
 
     pub fn boost(mut self, factor: f32) -> Query<'a> {
@@ -1390,6 +1395,14 @@ impl<'a> IndexReader<'a> {
                     QueryOperationSettings::StartsWith => {
                         self.load_hits(
                             self.do_search_in_index(fst::automaton::Str::new(query.query).starts_with(),index_automaton,query.query_id)?,
+                            index.1,
+                            index_data,
+                            query.boost_factor*index.0
+                        )
+                    },
+                    QueryOperationSettings::Subsequence => {
+                        self.load_hits(
+                            self.do_search_in_index(fst::automaton::Subsequence::new(query.query).starts_with(),index_automaton,query.query_id)?,
                             index.1,
                             index_data,
                             query.boost_factor*index.0
