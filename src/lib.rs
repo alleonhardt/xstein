@@ -1107,6 +1107,8 @@ impl<'a> SearchHit<'a> {
         else {
             self.index_hits[index].hit_descriptions.iter().map(|x|x).collect()
         };
+        
+
         let (prev,matched_words) = SearchHit::create_preview_on_hits(self.index_hits[index].content,preview,&preview_options)?;
         
         let mut string_builder = String::from(r"\b(");
@@ -2092,6 +2094,39 @@ mod tests {
             let preview = result.hits[0].create_preview(IndexEnum::Title,Some(preview_options)).unwrap();
             assert_eq!("For the sake of |it| hello sad.",preview);
 
+        }
+    }
+
+    #[test]
+    pub fn check_preview_additional() {
+        let mut mmaped = RAMFilesystem::new();
+        {
+            let mut index = IndexWriter::from_fs(&mut mmaped).unwrap();
+            index.add_index(IndexEnum::Body);
+            index.add_index(IndexEnum::Title);
+
+            let new_meta = DocumentMeta {
+                title: "Intel developers system manual",
+                path: "main.txt"
+            };
+
+            let mut new_doc = Document::new(&new_meta);
+            new_doc.add_field(IndexEnum::Title, "Alexander Leonhardt: Generators/Research/Blog about theoretical computer science");
+            index.add_document(new_doc);
+
+            let val = index.commit();
+            assert_eq!(val.is_err(),false);
+            assert_eq!(index.index_locked,true);
+        }
+
+        let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
+        let query = Query::starts_with("a").target(IndexEnum::Title);
+        let result = reader.search(query).unwrap();
+        
+        {
+            let preview_options = PreviewOptions::new().match_best(false).match_best_hits_only(false).on_highlight(|x|String::from("|")+x.get(0).unwrap().as_str()+"|").boundary(PreviewBoundary::BoundedSentenceBoundary(100));
+            let preview = result.hits[0].create_preview(IndexEnum::Title,Some(preview_options)).unwrap();
+            assert_eq!("|Alexander| Leonhardt: Generators/Research/Blog |about| theoretical computer science",preview);
         }
     }
 
