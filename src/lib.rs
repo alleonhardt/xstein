@@ -668,6 +668,34 @@ impl Ord for SublimeSubsequenceHit {
     }
 }
 
+#[derive(Debug)]
+pub struct SublimeSubsequenceHitWithFreq {
+    pub key: String,
+    pub score: i32,
+    pub freq: u32
+}
+
+impl PartialEq for SublimeSubsequenceHitWithFreq {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.eq(&other.score)
+    }
+}
+
+impl Eq for SublimeSubsequenceHitWithFreq {
+}
+
+impl PartialOrd for SublimeSubsequenceHitWithFreq {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        other.score.partial_cmp(&self.score)
+    }
+}
+
+impl Ord for SublimeSubsequenceHitWithFreq {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.score.cmp(&self.score)
+    }
+}
+
 
 enum QueryOperationSettings {
     LevenstheinDistance1,
@@ -1616,11 +1644,57 @@ impl<'a> IndexReader<'a> {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",i32_index)));
         }
     }
+
+    pub fn get_weighted_suggestions_with_freq<T: Into<i32>>(&'a self, index: T, query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHitWithFreq>,std::io::Error> {
+        let i32_index: i32 = index.into();
+        if let Some((index_automaton,index_data)) = self.index_data.get(&i32_index) {
+            let load_automaton = fst::Map::new(index_automaton).unwrap();
+
+            let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHitWithFreq>::with_capacity(limit);
+
+            let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
+            let mut min_score = i32::MIN;
+
+
+            while let Some((key_u8,value,state)) = result.next() {
+                let score = match state {
+                    SublimeSubsequenceAutomatonState::Matched(x) => x,
+                    _ => panic!("Impossible to reach this!")
+                };
+
+                if max_heap.len() == limit {
+                    if min_score < score {
+                        let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
+                        let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
+
+                        min_score = score;
+                        let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score, freq: val.docs.len() as u32};
+                    }
+                }
+                else {
+                    let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
+                    let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
+
+                    let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                    max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score, freq: val.docs.len() as u32});
+                    if min_score < score {
+                        min_score = score;
+                    }
+                }
+
+            }
+            return Ok(max_heap.into_sorted_vec());
+        }
+        else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",i32_index)));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::SublimeSubsequenceHit;
+    use crate::{SublimeSubsequenceHit, SublimeSubsequenceHitWithFreq};
 
     use super::{Document,RAMFilesystem,Filesystem,Index,IndexWriter,Query,MMapedFilesystem,IndexReader,RawTokenizer,Tokenizer,filter_long,PreviewOptions,PreviewBoundary,HeapIndexValue,DocumentTermCollection};
     use membuffer::MemBufferSerialize;
@@ -2438,6 +2512,44 @@ mod tests {
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 2);
             assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 14 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 11 }]);
+        }
+    }
+
+    #[test]
+    pub fn check_weighted_suggestions_with_freq() {
+        let mut mmaped = RAMFilesystem::new();
+        {
+            let mut index = IndexWriter::from_fs(&mut mmaped).unwrap();
+            index.add_index(IndexEnum::Body);
+            index.add_index(IndexEnum::Title);
+
+            let new_meta = DocumentMeta {
+                title: "Intel developers system manual",
+                path: "main.txt"
+            };
+
+            let mut new_doc = Document::new(&new_meta);
+            new_doc.add_field(IndexEnum::Title, "hello how are you? hlak");
+            index.add_document(new_doc);
+
+            let mut new_doc2 = Document::new(&new_meta);
+            new_doc2.add_field(IndexEnum::Title, "This is a sad title with hello in it! For the sake of it hello sad. How are you?");
+            index.add_document(new_doc2);
+
+            let val = index.commit();
+            assert_eq!(val.is_err(),false);
+            assert_eq!(index.index_locked,true);
+        }
+
+        
+        let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
+        
+        {
+            let result = reader.get_weighted_suggestions_with_freq(IndexEnum::Title, "hl", 5);
+            assert_eq!(result.is_err(),false);
+            let result_unwrappred = result.unwrap();
+            assert_eq!(result_unwrappred.len(), 2);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHitWithFreq { key: "hlak".to_string(), score: 14, freq: 2 }, SublimeSubsequenceHitWithFreq { key: "hello".to_string(), score: 11,freq: 2 }]);
         }
     }
 }
