@@ -562,10 +562,12 @@ pub(crate) struct DFAWrapper(pub DFA);
 impl fst::Automaton for DFAWrapper {
     type State = u32;
 
+    #[inline]
     fn start(&self) -> Self::State {
         self.0.initial_state()
     }
 
+    #[inline]
     fn is_match(&self, state: &Self::State) -> bool {
         match self.0.distance(*state) {
             Distance::Exact(_) => true,
@@ -573,12 +575,96 @@ impl fst::Automaton for DFAWrapper {
         }
     }
 
+    #[inline]
     fn can_match(&self, state: &u32) -> bool {
         *state != levenshtein_automata::SINK_STATE
     }
 
+    #[inline]
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
         self.0.transition(*state, byte)
+    }
+}
+
+pub struct SublimeSubsequenceAutomaton<'a>(&'a str);
+
+#[derive(Clone)]
+pub enum SublimeSubsequenceAutomatonState {
+    Matched(i32),
+    MatchScore {index: i32, score: i32, factor: i32},
+    Failed
+}
+
+impl<'a> fst::Automaton for SublimeSubsequenceAutomaton<'a> {
+    type State = SublimeSubsequenceAutomatonState;
+
+    #[inline]
+    fn start(&self) -> Self::State {
+        SublimeSubsequenceAutomatonState::MatchScore { index: 0, score: 0, factor: 3 }
+    }
+
+    #[inline]
+    fn is_match(&self, state: &Self::State) -> bool {
+        match state {
+            SublimeSubsequenceAutomatonState::Matched (_)=> true,
+            _ => false,
+        }
+    }
+
+    #[inline]
+    fn can_match(&self, state: &Self::State) -> bool {
+        match state {
+            SublimeSubsequenceAutomatonState::Failed => false,
+            _ => true
+        }
+    }
+
+    #[inline]
+    fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
+        match state {
+            SublimeSubsequenceAutomatonState::Failed => SublimeSubsequenceAutomatonState::Failed,
+            SublimeSubsequenceAutomatonState::Matched(x) => SublimeSubsequenceAutomatonState::Matched(*x),
+            SublimeSubsequenceAutomatonState::MatchScore{index,score,factor} => {
+                if self.0.as_bytes()[(*index) as usize] == byte {
+                    if (*index+1) as usize == self.0.len() {
+                        SublimeSubsequenceAutomatonState::Matched(*score+(factor<<1))
+                    }
+                    else {
+                        SublimeSubsequenceAutomatonState::MatchScore{index: index+1,score: *score+(factor<<1), factor: factor+1}
+                    }
+                }
+                else {
+                    SublimeSubsequenceAutomatonState::MatchScore{index: *index, score: *score-1, factor: 3}
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct SublimeSubsequenceHit {
+    pub key: String,
+    pub score: i32
+}
+
+impl PartialEq for SublimeSubsequenceHit {
+    fn eq(&self, other: &Self) -> bool {
+        self.score.eq(&other.score)
+    }
+}
+
+impl Eq for SublimeSubsequenceHit {
+}
+
+impl PartialOrd for SublimeSubsequenceHit {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        other.score.partial_cmp(&self.score)
+    }
+}
+
+impl Ord for SublimeSubsequenceHit {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        other.score.cmp(&self.score)
     }
 }
 
@@ -1492,10 +1578,50 @@ impl<'a> IndexReader<'a> {
         }
         Ok(return_value)
     }
+
+    pub fn get_weighted_suggestions<T: Into<i32>>(&'a self, index: T, query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHit>,std::io::Error> {
+        let i32_index: i32 = index.into();
+        if let Some((index_automaton,_)) = self.index_data.get(&i32_index) {
+            let load_automaton = fst::Map::new(index_automaton).unwrap();
+
+            let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHit>::with_capacity(limit);
+
+            let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
+            let mut min_score = i32::MIN;
+            while let Some((key_u8,_,state)) = result.next() {
+                let score = match state {
+                    SublimeSubsequenceAutomatonState::Matched(x) => x,
+                    _ => panic!("Impossible to reach this!")
+                };
+
+                if max_heap.len() == limit {
+                    if min_score < score {
+                        min_score = score;
+                        let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHit {key: key.to_string(),score};
+                    }
+                }
+                else {
+                    let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                    max_heap.push(SublimeSubsequenceHit {key: key.to_string(),score});
+                    if min_score < score {
+                        min_score = score;
+                    }
+                }
+
+            }
+            return Ok(max_heap.into_sorted_vec());
+        }
+        else {
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",i32_index)));
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::SublimeSubsequenceHit;
+
     use super::{Document,RAMFilesystem,Filesystem,Index,IndexWriter,Query,MMapedFilesystem,IndexReader,RawTokenizer,Tokenizer,filter_long,PreviewOptions,PreviewBoundary,HeapIndexValue,DocumentTermCollection};
     use membuffer::MemBufferSerialize;
     use serde::{Serialize,Deserialize};
@@ -2274,6 +2400,44 @@ mod tests {
         {
             let result = reader.get_suggestions(IndexEnum::Body, "h", 10000);
             assert_eq!(result.is_err(),true);
+        }
+    }
+
+    #[test]
+    pub fn check_weighted_suggestions() {
+        let mut mmaped = RAMFilesystem::new();
+        {
+            let mut index = IndexWriter::from_fs(&mut mmaped).unwrap();
+            index.add_index(IndexEnum::Body);
+            index.add_index(IndexEnum::Title);
+
+            let new_meta = DocumentMeta {
+                title: "Intel developers system manual",
+                path: "main.txt"
+            };
+
+            let mut new_doc = Document::new(&new_meta);
+            new_doc.add_field(IndexEnum::Title, "hello how are you? hlak");
+            index.add_document(new_doc);
+
+            let mut new_doc2 = Document::new(&new_meta);
+            new_doc2.add_field(IndexEnum::Title, "This is a sad title with hello in it! For the sake of it hello sad. How are you?");
+            index.add_document(new_doc2);
+
+            let val = index.commit();
+            assert_eq!(val.is_err(),false);
+            assert_eq!(index.index_locked,true);
+        }
+
+        
+        let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
+        
+        {
+            let result = reader.get_weighted_suggestions(IndexEnum::Title, "hl", 5);
+            assert_eq!(result.is_err(),false);
+            let result_unwrappred = result.unwrap();
+            assert_eq!(result_unwrappred.len(), 2);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 14 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 11 }]);
         }
     }
 }
