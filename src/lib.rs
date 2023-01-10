@@ -1618,7 +1618,7 @@ impl<'a> IndexReader<'a> {
             let mut min_score = i32::MIN;
             while let Some((key_u8,_,state)) = result.next() {
                 let score = match state {
-                    SublimeSubsequenceAutomatonState::Matched(x) => x,
+                    SublimeSubsequenceAutomatonState::Matched(x) => x-(key_u8.len() as i32-query.len() as i32),
                     _ => panic!("Impossible to reach this!")
                 };
 
@@ -1658,7 +1658,7 @@ impl<'a> IndexReader<'a> {
 
             while let Some((key_u8,value,state)) = result.next() {
                 let score = match state {
-                    SublimeSubsequenceAutomatonState::Matched(x) => x,
+                    SublimeSubsequenceAutomatonState::Matched(x) => x-(key_u8.len() as i32-query.len() as i32),
                     _ => panic!("Impossible to reach this!")
                 };
 
@@ -1669,7 +1669,7 @@ impl<'a> IndexReader<'a> {
 
                         min_score = score;
                         let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score-(key.len() as i32-query.len() as i32), freq: val.docs.len() as u32};
+                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32};
                     }
                 }
                 else {
@@ -1677,7 +1677,7 @@ impl<'a> IndexReader<'a> {
                     let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
 
                     let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                    max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score-(key.len() as i32-query.len() as i32), freq: val.docs.len() as u32});
+                    max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32});
                     if min_score < score {
                         min_score = score;
                     }
@@ -2510,7 +2510,7 @@ mod tests {
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 2);
-            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 14 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 11 }]);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 12 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 8 }]);
         }
     }
 
