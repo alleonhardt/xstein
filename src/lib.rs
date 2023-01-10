@@ -3,7 +3,7 @@
 #[cfg(feature = "bench")]
 extern crate test;
 
-use std::fs::File;
+use std::{fs::File, cmp::Reverse};
 use std::io::Write;
 use fst::{IntoStreamer, MapBuilder,Automaton};
 use memmap::Mmap;
@@ -590,8 +590,8 @@ pub struct SublimeSubsequenceAutomaton<'a>(&'a str);
 
 #[derive(Clone)]
 pub enum SublimeSubsequenceAutomatonState {
-    Matched(i32),
-    MatchScore {index: i32, score: i32, factor: i32},
+    Matched(i32,i32),
+    MatchScore {index: i32, score: i32, position: i32, streak: i32},
     Failed
 }
 
@@ -600,13 +600,13 @@ impl<'a> fst::Automaton for SublimeSubsequenceAutomaton<'a> {
 
     #[inline]
     fn start(&self) -> Self::State {
-        SublimeSubsequenceAutomatonState::MatchScore { index: 0, score: 0, factor: 3 }
+        SublimeSubsequenceAutomatonState::MatchScore { index: 0, score: 0, position: 0, streak: 1 }
     }
 
     #[inline]
     fn is_match(&self, state: &Self::State) -> bool {
         match state {
-            SublimeSubsequenceAutomatonState::Matched (_)=> true,
+            SublimeSubsequenceAutomatonState::Matched (_,_)=> true,
             _ => false,
         }
     }
@@ -623,18 +623,18 @@ impl<'a> fst::Automaton for SublimeSubsequenceAutomaton<'a> {
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
         match state {
             SublimeSubsequenceAutomatonState::Failed => SublimeSubsequenceAutomatonState::Failed,
-            SublimeSubsequenceAutomatonState::Matched(x) => SublimeSubsequenceAutomatonState::Matched(*x),
-            SublimeSubsequenceAutomatonState::MatchScore{index,score,factor} => {
+            SublimeSubsequenceAutomatonState::Matched(x,position )=> SublimeSubsequenceAutomatonState::Matched(*x,*position),
+            SublimeSubsequenceAutomatonState::MatchScore{index,score,position,streak} => {
                 if self.0.as_bytes()[(*index) as usize] == byte {
                     if (*index+1) as usize == self.0.len() {
-                        SublimeSubsequenceAutomatonState::Matched(*score+(factor<<1))
+                        SublimeSubsequenceAutomatonState::Matched(*score+(65565>>(position>>2))*streak,*position)
                     }
                     else {
-                        SublimeSubsequenceAutomatonState::MatchScore{index: index+1,score: *score+(factor<<1), factor: factor+1}
+                        SublimeSubsequenceAutomatonState::MatchScore{index: index+1,score: *score+(65565>>(position>>2))*streak, position: position+1, streak: streak<<1}
                     }
                 }
                 else {
-                    SublimeSubsequenceAutomatonState::MatchScore{index: *index, score: *score-1, factor: 3}
+                    SublimeSubsequenceAutomatonState::MatchScore{index: *index, score: *score-(65565>>(position>>2)), position: position+1, streak:1}
                 }
             }
         }
@@ -1228,8 +1228,9 @@ impl<'a> SearchHit<'a> {
         };
         
 
-        let (prev,matched_words) = SearchHit::create_preview_on_hits(self.index_hits[index].content,preview,&preview_options)?;
+        let (prev,mut matched_words) = SearchHit::create_preview_on_hits(self.index_hits[index].content,preview,&preview_options)?;
         
+        matched_words.sort_by_key(|f| Reverse(f.word_info.0.len()));
         let mut string_builder = String::from(r"\b(");
         for x in matched_words.iter() {
             let escaped_string = regex::escape(&x.word_info.0);
@@ -1618,7 +1619,7 @@ impl<'a> IndexReader<'a> {
             let mut min_score = i32::MIN;
             while let Some((key_u8,_,state)) = result.next() {
                 let score = match state {
-                    SublimeSubsequenceAutomatonState::Matched(x) => x-(key_u8.len() as i32-query.len() as i32),
+                    SublimeSubsequenceAutomatonState::Matched(x,pos) => x-(key_u8.len() as i32-pos)*(65565>>((pos+key_u8.len() as i32)>>3)),
                     _ => panic!("Impossible to reach this!")
                 };
 
@@ -1658,7 +1659,7 @@ impl<'a> IndexReader<'a> {
 
             while let Some((key_u8,value,state)) = result.next() {
                 let score = match state {
-                    SublimeSubsequenceAutomatonState::Matched(x) => x-(key_u8.len() as i32-query.len() as i32),
+                    SublimeSubsequenceAutomatonState::Matched(x,pos )=> x-(key_u8.len() as i32-pos)*(65565>>((pos+key_u8.len() as i32)>>3)),
                     _ => panic!("Impossible to reach this!")
                 };
 
@@ -2490,7 +2491,7 @@ mod tests {
             };
 
             let mut new_doc = Document::new(&new_meta);
-            new_doc.add_field(IndexEnum::Title, "hello how are you? hlak");
+            new_doc.add_field(IndexEnum::Title, "hello how are you? hlak hlakkaskdjasjfjsakfdsajfkjsad");
             index.add_document(new_doc);
 
             let mut new_doc2 = Document::new(&new_meta);
@@ -2509,8 +2510,15 @@ mod tests {
             let result = reader.get_weighted_suggestions(IndexEnum::Title, "hl", 5);
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
-            assert_eq!(result_unwrappred.len(), 2);
-            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 12 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 8 }]);
+            assert_eq!(result_unwrappred.len(), 3);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 296 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 8 }, SublimeSubsequenceHit { key: "hlakkaskdjasjfjsakfdsajfkjsad".to_string(), score: -13 }]);
+        }
+        {
+            let result = reader.get_weighted_suggestions(IndexEnum::Title, "hl", 1);
+            assert_eq!(result.is_err(),false);
+            let result_unwrappred = result.unwrap();
+            assert_eq!(result_unwrappred.len(), 1);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 12 }]);
         }
     }
 
