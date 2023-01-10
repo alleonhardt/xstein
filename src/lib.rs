@@ -1669,7 +1669,7 @@ impl<'a> IndexReader<'a> {
 
                         min_score = score;
                         let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score, freq: val.docs.len() as u32};
+                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score-(key.len() as i32-query.len() as i32), freq: val.docs.len() as u32};
                     }
                 }
                 else {
@@ -1677,12 +1677,11 @@ impl<'a> IndexReader<'a> {
                     let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
 
                     let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                    max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score, freq: val.docs.len() as u32});
+                    max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score-(key.len() as i32-query.len() as i32), freq: val.docs.len() as u32});
                     if min_score < score {
                         min_score = score;
                     }
                 }
-
             }
             return Ok(max_heap.into_sorted_vec());
         }
@@ -2549,7 +2548,7 @@ mod tests {
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 2);
-            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHitWithFreq { key: "hlak".to_string(), score: 14, freq: 2 }, SublimeSubsequenceHitWithFreq { key: "hello".to_string(), score: 11,freq: 2 }]);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHitWithFreq { key: "hlak".to_string(), score: 12, freq: 2 }, SublimeSubsequenceHitWithFreq { key: "hello".to_string(), score: 8,freq: 2 }]);
         }
     }
 }
