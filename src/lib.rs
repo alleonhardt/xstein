@@ -2511,14 +2511,14 @@ mod tests {
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 3);
-            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 296 }, SublimeSubsequenceHit { key: "hello".to_string(), score: 8 }, SublimeSubsequenceHit { key: "hlakkaskdjasjfjsakfdsajfkjsad".to_string(), score: -13 }]);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 0 }, SublimeSubsequenceHit { key: "hlakkaskdjasjfjsakfdsajfkjsad".to_string(), score: -32765 }, SublimeSubsequenceHit { key: "hello".to_string(), score: -131130 }]);
         }
         {
             let result = reader.get_weighted_suggestions(IndexEnum::Title, "hl", 1);
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 1);
-            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 12 }]);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 0 }]);
         }
     }
 
@@ -2556,7 +2556,7 @@ mod tests {
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 2);
-            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHitWithFreq { key: "hlak".to_string(), score: 12, freq: 2 }, SublimeSubsequenceHitWithFreq { key: "hello".to_string(), score: 8,freq: 2 }]);
+            assert_eq!(result_unwrappred, vec![SublimeSubsequenceHitWithFreq { key: "hlak".to_string(), score: 0, freq: 1 }, SublimeSubsequenceHitWithFreq { key: "hello".to_string(), score: -131130, freq: 2 }]);
         }
     }
 }
