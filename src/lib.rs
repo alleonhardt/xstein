@@ -1611,14 +1611,13 @@ impl<'a> IndexReader<'a> {
 
     pub fn get_weighted_suggestions<T: Into<i32>+Clone>(&'a self, index: &[T], query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHit>,std::io::Error> {
         let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHit>::with_capacity(limit);
-        
+        let mut min_score = i32::MIN;
+
         for i32_index in index.iter().map(|x| x.clone().into()) {
         if let Some((index_automaton,_)) = self.index_data.get(&i32_index) {
             let load_automaton = fst::Map::new(index_automaton).unwrap();
-
-
             let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
-            let mut min_score = i32::MIN;
+
             while let Some((key_u8,_,state)) = result.next() {
                 let score = match state {
                     SublimeSubsequenceAutomatonState::Matched(x,pos) => x-(key_u8.len() as i32-pos)*(65565>>((pos+key_u8.len() as i32)>>3)),
@@ -1652,14 +1651,13 @@ impl<'a> IndexReader<'a> {
 
     pub fn get_weighted_suggestions_with_freq<T: Into<i32>+Clone>(&'a self, index: &[T], query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHitWithFreq>,std::io::Error> {
         let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHitWithFreq>::with_capacity(limit);
-
+        let mut min_score = i32::MIN;
         
         for i32_index in index.iter().map(|x| x.clone().into()) {
             if let Some((index_automaton,index_data)) = self.index_data.get(&i32_index) {
                 let load_automaton = fst::Map::new(index_automaton).unwrap();
-    
                 let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
-                let mut min_score = i32::MIN;
+
     
     
                 while let Some((key_u8,value,state)) = result.next() {
