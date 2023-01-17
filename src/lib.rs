@@ -647,6 +647,7 @@ pub struct SublimeSubsequenceHit {
     pub score: i32
 }
 
+
 impl PartialEq for SublimeSubsequenceHit {
     fn eq(&self, other: &Self) -> bool {
         self.score.eq(&other.score)
@@ -1608,12 +1609,13 @@ impl<'a> IndexReader<'a> {
         Ok(return_value)
     }
 
-    pub fn get_weighted_suggestions<T: Into<i32>>(&'a self, index: T, query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHit>,std::io::Error> {
-        let i32_index: i32 = index.into();
+    pub fn get_weighted_suggestions<T: Into<i32>+Clone>(&'a self, index: &[T], query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHit>,std::io::Error> {
+        let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHit>::with_capacity(limit);
+        
+        for i32_index in index.iter().map(|x| x.clone().into()) {
         if let Some((index_automaton,_)) = self.index_data.get(&i32_index) {
             let load_automaton = fst::Map::new(index_automaton).unwrap();
 
-            let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHit>::with_capacity(limit);
 
             let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
             let mut min_score = i32::MIN;
@@ -1639,56 +1641,60 @@ impl<'a> IndexReader<'a> {
                 }
 
             }
-            return Ok(max_heap.into_sorted_vec());
         }
         else {
             return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",i32_index)));
         }
     }
+    return Ok(max_heap.into_sorted_vec());
 
-    pub fn get_weighted_suggestions_with_freq<T: Into<i32>>(&'a self, index: T, query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHitWithFreq>,std::io::Error> {
-        let i32_index: i32 = index.into();
-        if let Some((index_automaton,index_data)) = self.index_data.get(&i32_index) {
-            let load_automaton = fst::Map::new(index_automaton).unwrap();
+    }
 
-            let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHitWithFreq>::with_capacity(limit);
+    pub fn get_weighted_suggestions_with_freq<T: Into<i32>+Clone>(&'a self, index: &[T], query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHitWithFreq>,std::io::Error> {
+        let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHitWithFreq>::with_capacity(limit);
 
-            let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
-            let mut min_score = i32::MIN;
-
-
-            while let Some((key_u8,value,state)) = result.next() {
-                let score = match state {
-                    SublimeSubsequenceAutomatonState::Matched(x,pos )=> x-(key_u8.len() as i32-pos)*(65565>>((pos+key_u8.len() as i32)>>3)),
-                    _ => panic!("Impossible to reach this!")
-                };
-
-                if max_heap.len() == limit {
-                    if min_score < score {
+        
+        for i32_index in index.iter().map(|x| x.clone().into()) {
+            if let Some((index_automaton,index_data)) = self.index_data.get(&i32_index) {
+                let load_automaton = fst::Map::new(index_automaton).unwrap();
+    
+                let mut result = load_automaton.search_with_state(SublimeSubsequenceAutomaton(query)).into_stream();
+                let mut min_score = i32::MIN;
+    
+    
+                while let Some((key_u8,value,state)) = result.next() {
+                    let score = match state {
+                        SublimeSubsequenceAutomatonState::Matched(x,pos )=> x-(key_u8.len() as i32-pos)*(65565>>((pos+key_u8.len() as i32)>>3)),
+                        _ => panic!("Impossible to reach this!")
+                    };
+    
+                    if max_heap.len() == limit {
+                        if min_score < score {
+                            let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
+                            let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
+    
+                            min_score = score;
+                            let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                            *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32};
+                        }
+                    }
+                    else {
                         let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
                         let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
-
-                        min_score = score;
+    
                         let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32};
-                    }
-                }
-                else {
-                    let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
-                    let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
-
-                    let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                    max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32});
-                    if min_score < score {
-                        min_score = score;
+                        max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32});
+                        if min_score < score {
+                            min_score = score;
+                        }
                     }
                 }
             }
-            return Ok(max_heap.into_sorted_vec());
+            else {
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",i32_index)));
+            }
         }
-        else {
-            return Err(std::io::Error::new(std::io::ErrorKind::NotFound,format!("Could not find index or index is not loaded \"{}\"",i32_index)));
-        }
+        return Ok(max_heap.into_sorted_vec());
     }
 }
 
@@ -1833,6 +1839,7 @@ mod tests {
         assert_ne!(index.document_data.len(),0);
     }
 
+    #[derive(Clone)]
     enum IndexEnum {
         Body,
         Title,
@@ -2507,14 +2514,14 @@ mod tests {
         let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
         
         {
-            let result = reader.get_weighted_suggestions(IndexEnum::Title, "hl", 5);
+            let result = reader.get_weighted_suggestions(&[IndexEnum::Title], "hl", 5);
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 3);
             assert_eq!(result_unwrappred, vec![SublimeSubsequenceHit { key: "hlak".to_string(), score: 0 }, SublimeSubsequenceHit { key: "hlakkaskdjasjfjsakfdsajfkjsad".to_string(), score: -32765 }, SublimeSubsequenceHit { key: "hello".to_string(), score: -131130 }]);
         }
         {
-            let result = reader.get_weighted_suggestions(IndexEnum::Title, "hl", 1);
+            let result = reader.get_weighted_suggestions(&[IndexEnum::Title], "hl", 1);
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 1);
@@ -2552,7 +2559,7 @@ mod tests {
         let reader = IndexReader::from_fs(&mmaped,vec![IndexEnum::Title]).unwrap();
         
         {
-            let result = reader.get_weighted_suggestions_with_freq(IndexEnum::Title, "hl", 5);
+            let result = reader.get_weighted_suggestions_with_freq(&[IndexEnum::Title], "hl", 5);
             assert_eq!(result.is_err(),false);
             let result_unwrappred = result.unwrap();
             assert_eq!(result_unwrappred.len(), 2);
