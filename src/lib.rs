@@ -1612,6 +1612,7 @@ impl<'a> IndexReader<'a> {
     pub fn get_weighted_suggestions<T: Into<i32>+Clone>(&'a self, index: &[T], query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHit>,std::io::Error> {
         let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHit>::with_capacity(limit);
         let mut min_score = i32::MIN;
+        let mut deduplication_set = std::collections::HashSet::with_capacity(limit<<1);
 
         for i32_index in index.iter().map(|x| x.clone().into()) {
         if let Some((index_automaton,_)) = self.index_data.get(&i32_index) {
@@ -1623,17 +1624,21 @@ impl<'a> IndexReader<'a> {
                     SublimeSubsequenceAutomatonState::Matched(x,pos) => x-(key_u8.len() as i32-pos)*(65565>>((pos+key_u8.len() as i32)>>3)),
                     _ => panic!("Impossible to reach this!")
                 };
+                let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+
 
                 if max_heap.len() == limit {
-                    if min_score < score {
+                    if min_score < score && !deduplication_set.contains(key) {
                         min_score = score;
-                        let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                        *max_heap.peek_mut().unwrap() = SublimeSubsequenceHit {key: key.to_string(),score};
+                        if let Some(mut value) = max_heap.peek_mut() {
+                            deduplication_set.remove(&value.key);
+                            *value = SublimeSubsequenceHit {key: key.to_string(),score: score};
+                        }
                     }
                 }
-                else {
-                    let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                else if !deduplication_set.contains(key) {
                     max_heap.push(SublimeSubsequenceHit {key: key.to_string(),score});
+                    deduplication_set.insert(key.to_string());
                     if min_score < score {
                         min_score = score;
                     }
@@ -1652,6 +1657,7 @@ impl<'a> IndexReader<'a> {
     pub fn get_weighted_suggestions_with_freq<T: Into<i32>+Clone>(&'a self, index: &[T], query: &str, limit: usize) -> Result<Vec<SublimeSubsequenceHitWithFreq>,std::io::Error> {
         let mut max_heap = std::collections::BinaryHeap::<SublimeSubsequenceHitWithFreq>::with_capacity(limit);
         let mut min_score = i32::MIN;
+        let mut deduplication_set = std::collections::HashSet::with_capacity(limit<<1);
         
         for i32_index in index.iter().map(|x| x.clone().into()) {
             if let Some((index_automaton,index_data)) = self.index_data.get(&i32_index) {
@@ -1666,21 +1672,25 @@ impl<'a> IndexReader<'a> {
                         _ => panic!("Impossible to reach this!")
                     };
     
+                    let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+
                     if max_heap.len() == limit {
-                        if min_score < score {
+                        if min_score < score && !deduplication_set.contains(key) {
                             let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
                             let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
     
                             min_score = score;
-                            let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
-                            *max_heap.peek_mut().unwrap() = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32};
+                            if let Some(mut value) = max_heap.peek_mut() {
+                                deduplication_set.remove(&value.key);
+                                *value = SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32};
+                            }
                         }
                     }
-                    else {
+                    else if !deduplication_set.contains(key) {
                         let reader = MemBufferReader::new(&index_data[value as usize..]).unwrap();
                         let val: DocumentTermCollection = reader.load_entry(reader.len()-1).unwrap();
-    
-                        let key = unsafe{std::str::from_utf8_unchecked(key_u8)};
+                        deduplication_set.insert(key.to_string());
+
                         max_heap.push(SublimeSubsequenceHitWithFreq {key: key.to_string(),score: score, freq: val.docs.len() as u32});
                         if min_score < score {
                             min_score = score;
